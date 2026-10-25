@@ -1,0 +1,8 @@
+../Core/Src/game.c:4:6:ttt_init	1
+../Core/Src/game.c:15:11:ttt_connect	2
+../Core/Src/game.c:27:11:ttt_new	3
+../Core/Src/game.c:49:6:ttt_has_won	7
+../Core/Src/game.c:85:6:ttt_is_board_full	3
+../Core/Src/game.c:98:11:ttt_move	13
+../Core/Src/game.c:158:11:ttt_resign	7
+../Core/Src/game.c:191:11:ttt_disconnect	1
