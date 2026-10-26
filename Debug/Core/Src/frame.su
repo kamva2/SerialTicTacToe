@@ -1,0 +1,5 @@
+../Core/Src/frame.c:3:6:frame_init	16	static
+../Core/Src/frame.c:16:19:frame_reject	16	static
+../Core/Src/frame.c:27:12:frame_check_timeout	24	static
+../Core/Src/frame.c:52:12:frame_receive_byte	40	static
+../Core/Src/frame.c:160:13:frame_error_response	16	static

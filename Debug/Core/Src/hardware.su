@@ -1,0 +1,2 @@
+../Core/Src/hardware.c:17:6:hardware_init	48	static
+../Core/Src/hardware.c:55:6:hardware_service	40	static

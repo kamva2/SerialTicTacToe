@@ -5,9 +5,12 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../Core/Src/frame.c \
 ../Core/Src/game.c \
 ../Core/Src/game_test.c \
+../Core/Src/hardware.c \
 ../Core/Src/main.c \
+../Core/Src/protocol.c \
 ../Core/Src/stm32f0xx_hal_msp.c \
 ../Core/Src/stm32f0xx_it.c \
 ../Core/Src/syscalls.c \
@@ -15,9 +18,12 @@ C_SRCS += \
 ../Core/Src/system_stm32f0xx.c 
 
 OBJS += \
+./Core/Src/frame.o \
 ./Core/Src/game.o \
 ./Core/Src/game_test.o \
+./Core/Src/hardware.o \
 ./Core/Src/main.o \
+./Core/Src/protocol.o \
 ./Core/Src/stm32f0xx_hal_msp.o \
 ./Core/Src/stm32f0xx_it.o \
 ./Core/Src/syscalls.o \
@@ -25,9 +31,12 @@ OBJS += \
 ./Core/Src/system_stm32f0xx.o 
 
 C_DEPS += \
+./Core/Src/frame.d \
 ./Core/Src/game.d \
 ./Core/Src/game_test.d \
+./Core/Src/hardware.d \
 ./Core/Src/main.d \
+./Core/Src/protocol.d \
 ./Core/Src/stm32f0xx_hal_msp.d \
 ./Core/Src/stm32f0xx_it.d \
 ./Core/Src/syscalls.d \
@@ -42,7 +51,7 @@ Core/Src/%.o Core/Src/%.su Core/Src/%.cyclo: ../Core/Src/%.c Core/Src/subdir.mk
 clean: clean-Core-2f-Src
 
 clean-Core-2f-Src:
-	-$(RM) ./Core/Src/game.cyclo ./Core/Src/game.d ./Core/Src/game.o ./Core/Src/game.su ./Core/Src/game_test.cyclo ./Core/Src/game_test.d ./Core/Src/game_test.o ./Core/Src/game_test.su ./Core/Src/main.cyclo ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/stm32f0xx_hal_msp.cyclo ./Core/Src/stm32f0xx_hal_msp.d ./Core/Src/stm32f0xx_hal_msp.o ./Core/Src/stm32f0xx_hal_msp.su ./Core/Src/stm32f0xx_it.cyclo ./Core/Src/stm32f0xx_it.d ./Core/Src/stm32f0xx_it.o ./Core/Src/stm32f0xx_it.su ./Core/Src/syscalls.cyclo ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.cyclo ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32f0xx.cyclo ./Core/Src/system_stm32f0xx.d ./Core/Src/system_stm32f0xx.o ./Core/Src/system_stm32f0xx.su
+	-$(RM) ./Core/Src/frame.cyclo ./Core/Src/frame.d ./Core/Src/frame.o ./Core/Src/frame.su ./Core/Src/game.cyclo ./Core/Src/game.d ./Core/Src/game.o ./Core/Src/game.su ./Core/Src/game_test.cyclo ./Core/Src/game_test.d ./Core/Src/game_test.o ./Core/Src/game_test.su ./Core/Src/hardware.cyclo ./Core/Src/hardware.d ./Core/Src/hardware.o ./Core/Src/hardware.su ./Core/Src/main.cyclo ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/protocol.cyclo ./Core/Src/protocol.d ./Core/Src/protocol.o ./Core/Src/protocol.su ./Core/Src/stm32f0xx_hal_msp.cyclo ./Core/Src/stm32f0xx_hal_msp.d ./Core/Src/stm32f0xx_hal_msp.o ./Core/Src/stm32f0xx_hal_msp.su ./Core/Src/stm32f0xx_it.cyclo ./Core/Src/stm32f0xx_it.d ./Core/Src/stm32f0xx_it.o ./Core/Src/stm32f0xx_it.su ./Core/Src/syscalls.cyclo ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.cyclo ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32f0xx.cyclo ./Core/Src/system_stm32f0xx.d ./Core/Src/system_stm32f0xx.o ./Core/Src/system_stm32f0xx.su
 
 .PHONY: clean-Core-2f-Src
 

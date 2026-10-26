@@ -1,0 +1,7 @@
+../Core/Src/protocol.c:5:13:protocol_status_response	16	static
+../Core/Src/protocol.c:38:20:protocol_phase_text	16	static
+../Core/Src/protocol.c:53:20:protocol_result_text	16	static
+../Core/Src/protocol.c:80:6:protocol_format_snapshot	80	static
+../Core/Src/protocol.c:154:13:protocol_copy_response	32	static
+../Core/Src/protocol.c:171:13:protocol_parse_move	40	static
+../Core/Src/protocol.c:241:6:protocol_handle_command	48	static
