@@ -1,6 +1,4 @@
-"""Background serial worker. Never accesses Tkinter widgets."""
-
-from __future__ import annotations
+"""Serial worker: bounded reads, no Tkinter calls or action retries."""
 
 from dataclasses import dataclass
 import queue
@@ -28,6 +26,8 @@ class WorkerEvent:
     error: str | None = None
     port_open: bool = False
     session_connected: bool = False
+    notice: str | None = None
+    recovery_error: str | None = None
 
 
 class SerialWorker(threading.Thread):
@@ -91,11 +91,10 @@ class SerialWorker(threading.Thread):
             **details,
         )
 
-    def _request(self, command):
-        text = self._link.request(command)
+    def _interpret(self, command, text):
         reply = parse_response(command, text)
 
-        if reply.frame_error:
+        if reply.frame_error and command != "STATE":
             self._link.resynchronise()
 
         if reply.kind == "OK":
@@ -109,33 +108,154 @@ class SerialWorker(threading.Thread):
         elif reply.error_code == "NOTCONNECTED":
             self._session_connected = False
 
+        elif command == "STATE" and (
+            reply.kind == "SNAPSHOT"
+            or reply.error_code == "NOGAME"
+        ):
+            self._session_connected = True
+
         return reply
+
+    def _request(self, command):
+        return self._interpret(
+            command,
+            self._link.request(command),
+        )
+
+    def _read_state(self, mode="normal"):
+        if mode == "probe":
+            text = self._link.probe_state()
+
+        elif mode == "recover":
+            text = self._link.recover_state()
+
+        else:
+            text = self._link.request("STATE")
+
+        reply = self._interpret("STATE", text)
+
+        if (
+            reply.kind != "SNAPSHOT"
+            and reply.error_code not in {
+                "NOGAME",
+                "NOTCONNECTED",
+            }
+        ):
+            raise ProtocolError(
+                f"Unexpected STATE reply: {text!r}"
+            )
+
+        return reply
+
+    def _close_if_unconnected(self, reply):
+        if reply.error_code == "NOTCONNECTED":
+            self._link.close()
+
+    def _automatic_state(self, task):
+        try:
+            reply = self._read_state()
+
+        except (LinkError, ProtocolError) as original:
+            try:
+                reply = self._read_state("recover")
+
+            except (LinkError, ProtocolError) as recovery:
+                sample = self._link.recovery_sample
+
+                raise LinkError(
+                    f"Background STATE failed: {original}; "
+                    f"one recovery failed: {recovery}; "
+                    f"discarded bytes: {sample!r}"
+                ) from recovery
+
+            detail = (
+                f"{original}; discarded bytes: "
+                f"{self._link.recovery_sample!r}"
+            )
+
+            self._close_if_unconnected(reply)
+
+            return self._event(
+                task,
+                reply=reply,
+                recovery_error=detail,
+                notice=(
+                    "Communication restored. "
+                    "STM32 state synchronised."
+                    if self._session_connected
+                    else
+                    "The STM32 has no session. "
+                    "Connect to start again."
+                ),
+            )
+
+        self._close_if_unconnected(reply)
+
+        return self._event(
+            task,
+            reply=reply,
+            notice=(
+                "The STM32 has no session. "
+                "Connect to start again."
+                if not self._session_connected
+                else None
+            ),
+        )
 
     def _process(self, task):
         if task.operation == "PORTS":
             return self._event(
                 task,
-                ports=tuple(self._link.available_ports()),
+                ports=tuple(
+                    self._link.available_ports()
+                ),
             )
 
         if task.operation == "CONNECT":
             self._link.open(task.port_name)
-            reply = self._request("CONNECT")
+
+            # Read first so reconnecting can retain the game.
+            reply = self._read_state("probe")
+
+            if reply.error_code == "NOTCONNECTED":
+                reply = self._request("CONNECT")
+
+                if reply.kind != "OK":
+                    raise ProtocolError(
+                        "CONNECT was not acknowledged."
+                    )
+
+                notice = "Connected."
+
+            elif reply.kind == "SNAPSHOT":
+                notice = (
+                    "Reconnected. "
+                    "Game restored from the STM32."
+                )
+
+            else:
+                notice = "Connected. Start a new game."
 
             return self._event(
                 task,
                 reply=reply,
+                notice=notice,
             )
 
         if task.operation == "COMMAND":
+            if task.automatic and task.command == "STATE":
+                return self._automatic_state(task)
+
+            # User actions are sent once only.
             reply = self._request(task.command)
+            self._close_if_unconnected(reply)
 
             return self._event(
                 task,
                 reply=reply,
             )
 
-        # STOP: finish a known session cleanly.
+        # STOP: explicitly close a confirmed session.
         if self._link.is_open and self._session_connected:
             reply = self._request("DISCONNECT")
 
@@ -144,9 +264,6 @@ class SerialWorker(threading.Thread):
                     "DISCONNECT was not acknowledged."
                 )
 
-        # CONNECT/BUSY leaves an unattached port.
-        # Close it locally without silently clearing the retained game.
-        # The user can explicitly request DISCONNECT before closing.
         self._link.close()
         self._session_connected = False
 
@@ -157,6 +274,7 @@ class SerialWorker(threading.Thread):
 
         try:
             self._link.close()
+
         except (LinkError, OSError) as close_error:
             message += (
                 " Closing the port also failed: "
@@ -187,8 +305,6 @@ class SerialWorker(threading.Thread):
             ) as exc:
                 event = self._failure(task, exc)
 
-            # Allow the GUI to submit another job after it receives
-            # this completion event.
             self._slot.release()
             self.events.put(event)
             self._tasks.task_done()

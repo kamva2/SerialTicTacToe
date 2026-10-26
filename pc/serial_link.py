@@ -1,6 +1,4 @@
-"""Serial transport for the EEE3095S Tic-Tac-Toe protocol."""
-
-from __future__ import annotations
+"""Bounded UART transactions. Players have no thinking-time limit."""
 
 import threading
 import time
@@ -11,25 +9,28 @@ from serial.tools import list_ports
 MAX_FRAME_LENGTH = 96
 RESPONSE_TIMEOUT = 2.0
 WRITE_TIMEOUT = 1.0
+QUIET_SECONDS = 0.2
+DRAIN_LIMIT = 1.5
 
 
 class LinkError(RuntimeError):
-    """The serial link could not complete a reliable transaction."""
+    pass
 
 
 class SerialLink:
-    """Use from one worker thread; only one request may be outstanding."""
-
     def __init__(self):
         self._port = None
         self._faulted = False
+        self._last_command = None
+        self._state_recovery_allowed = False
+        self._recovery_sample = bytearray()
         self._request_lock = threading.Lock()
 
     @staticmethod
     def available_ports():
         return sorted(
-            (port.device, port.description or "Serial port")
-            for port in list_ports.comports()
+            (p.device, p.description or "Serial port")
+            for p in list_ports.comports()
         )
 
     @property
@@ -39,6 +40,10 @@ class SerialLink:
     @property
     def faulted(self):
         return self._faulted
+
+    @property
+    def recovery_sample(self):
+        return bytes(self._recovery_sample)
 
     def open(self, port_name):
         if self.is_open:
@@ -72,11 +77,15 @@ class SerialLink:
 
         self._port = connection
         self._faulted = False
+        self._last_command = None
+        self._state_recovery_allowed = False
+        self._recovery_sample.clear()
 
     def close(self):
-        connection = self._port
-        self._port = None
+        connection, self._port = self._port, None
         self._faulted = False
+        self._last_command = None
+        self._state_recovery_allowed = False
 
         if connection is not None:
             try:
@@ -86,41 +95,69 @@ class SerialLink:
                     f"Cannot close serial port: {exc}"
                 ) from exc
 
-    def resynchronise(self):
-        """After a known frame NACK, send one bare LF."""
+    def _acquire(self):
         if not self.is_open:
-            raise LinkError("The serial port is not open.")
-
-        if self._faulted:
-            raise LinkError(
-                "Restart the uncertain board/session first."
-            )
+            raise LinkError("Open the UART adapter's port first.")
 
         if not self._request_lock.acquire(blocking=False):
             raise LinkError(
                 "Another serial request is already pending."
             )
 
-        try:
-            if self._port.in_waiting:
+    def _exchange_locked(self, command, payload):
+        connection = self._port
+
+        if connection.in_waiting:
+            raise LinkError(
+                "Unexpected serial input before the request."
+            )
+
+        self._last_command = command
+        frame = payload + b"\n"
+
+        if connection.write(frame) != len(frame):
+            raise LinkError(
+                "The complete request could not be written."
+            )
+
+        deadline = time.monotonic() + RESPONSE_TIMEOUT
+        response = bytearray()
+
+        while True:
+            remaining = deadline - time.monotonic()
+
+            if remaining <= 0:
                 raise LinkError(
-                    "Unexpected input before resynchronisation."
+                    "Response timed out; the command outcome "
+                    "is unknown."
                 )
 
-            if self._port.write(b"\n") != 1:
+            connection.timeout = min(0.05, remaining)
+            byte = connection.read(1)
+
+            if not byte:
+                continue
+
+            if byte == b"\n":
+                if not response:
+                    raise LinkError("Received an empty response.")
+
+                return response.decode("ascii")
+
+            if len(response) >= MAX_FRAME_LENGTH:
                 raise LinkError(
-                    "The resynchronisation LF could not be written."
+                    "The response exceeded 96 bytes."
                 )
 
-        except (serial.SerialException, OSError, LinkError) as exc:
-            self._faulted = True
-            raise LinkError(str(exc)) from exc
+            if not 0x20 <= byte[0] <= 0x7E:
+                raise LinkError(
+                    f"Invalid response byte 0x{byte[0]:02X}; "
+                    f"received prefix {bytes(response[:32])!r}."
+                )
 
-        finally:
-            self._request_lock.release()
+            response.extend(byte)
 
     def request(self, command):
-        """Send a command without LF; return a response without LF."""
         try:
             payload = command.encode("ascii")
         except UnicodeEncodeError as exc:
@@ -133,95 +170,169 @@ class SerialLink:
                 "Command length must be 1 to 96 bytes."
             )
 
-        if any(byte < 0x20 or byte > 0x7E for byte in payload):
+        if any(
+            not 0x20 <= byte <= 0x7E
+            for byte in payload
+        ):
             raise ValueError(
                 "Do not include CR, LF or control characters."
             )
 
-        if not self.is_open:
-            raise LinkError(
-                "Open the UART adapter's serial port first."
-            )
-
         if self._faulted:
             raise LinkError(
-                "Link outcome is uncertain. Restart the board/session "
-                "before continuing."
+                "Reconnect to synchronise the uncertain session."
             )
 
-        if not self._request_lock.acquire(blocking=False):
-            raise LinkError(
-                "Another serial request is already pending."
-            )
+        self._acquire()
 
         try:
-            connection = self._port
+            # A blocked request cannot enable recovery.
+            self._state_recovery_allowed = command == "STATE"
 
-            if connection.in_waiting:
-                raise LinkError(
-                    "Unexpected serial input before the request."
-                )
+            return self._exchange_locked(command, payload)
 
-            frame = payload + b"\n"
-
-            if connection.write(frame) != len(frame):
-                raise LinkError(
-                    "The complete request could not be written."
-                )
-
-            deadline = time.monotonic() + RESPONSE_TIMEOUT
-            response = bytearray()
-
-            while True:
-                remaining = deadline - time.monotonic()
-
-                if remaining <= 0:
-                    raise LinkError(
-                        "Response timed out; the command outcome "
-                        "is unknown."
-                    )
-
-                connection.timeout = min(0.05, remaining)
-                byte = connection.read(1)
-
-                if not byte:
-                    continue
-
-                if byte == b"\n":
-                    if not response:
-                        raise LinkError(
-                            "Received an empty response."
-                        )
-
-                    return response.decode("ascii")
-
-                if len(response) >= MAX_FRAME_LENGTH:
-                    raise LinkError(
-                        "The response exceeded 96 bytes."
-                    )
-
-                if byte[0] < 0x20 or byte[0] > 0x7E:
-                    raise LinkError(
-                        "The response contained an invalid byte."
-                    )
-
-                response.extend(byte)
-
-        except (serial.SerialException, OSError, LinkError) as exc:
+        except (
+            serial.SerialException,
+            OSError,
+            LinkError,
+        ) as exc:
             self._faulted = True
             raise LinkError(str(exc)) from exc
 
         finally:
             self._request_lock.release()
 
+    def resynchronise(self):
+        """A known frame NACK may require a terminating LF."""
+        if self._faulted:
+            raise LinkError(
+                "Reconnect to synchronise the uncertain session."
+            )
+
+        self._acquire()
+
+        try:
+            if self._port.in_waiting:
+                raise LinkError(
+                    "Unexpected input before resynchronisation."
+                )
+
+            if self._port.write(b"\n") != 1:
+                raise LinkError(
+                    "Could not write the resynchronisation LF."
+                )
+
+        except (
+            serial.SerialException,
+            OSError,
+            LinkError,
+        ) as exc:
+            self._faulted = True
+            raise LinkError(str(exc)) from exc
+
+        finally:
+            self._request_lock.release()
+
+    def _drain_until_quiet(self):
+        deadline = time.monotonic() + DRAIN_LIMIT
+        quiet_since = time.monotonic()
+
+        while True:
+            now = time.monotonic()
+            quiet_left = (
+                QUIET_SECONDS - (now - quiet_since)
+            )
+
+            if quiet_left <= 0:
+                return
+
+            if now >= deadline:
+                raise LinkError(
+                    "Serial input did not become quiet."
+                )
+
+            self._port.timeout = min(
+                0.05,
+                quiet_left,
+                deadline - now,
+            )
+
+            data = self._port.read(
+                min(
+                    MAX_FRAME_LENGTH + 1,
+                    self._port.in_waiting or 1,
+                )
+            )
+
+            if data:
+                room = max(
+                    0,
+                    32 - len(self._recovery_sample),
+                )
+
+                self._recovery_sample.extend(data[:room])
+                quiet_since = time.monotonic()
+
+    def _state_fence(self):
+        self._acquire()
+
+        try:
+            self._faulted = True
+            self._recovery_sample.clear()
+
+            self._drain_until_quiet()
+
+            if self._port.write(b"\n") != 1:
+                raise LinkError(
+                    "Could not write the recovery LF."
+                )
+
+            self._drain_until_quiet()
+
+            text = self._exchange_locked(
+                "STATE",
+                b"STATE",
+            )
+
+            self._faulted = False
+            return text
+
+        except (
+            serial.SerialException,
+            OSError,
+            LinkError,
+        ) as exc:
+            self._faulted = True
+            raise LinkError(str(exc)) from exc
+
+        finally:
+            self._request_lock.release()
+
+    def probe_state(self):
+        """Read the retained game after opening a fresh port."""
+        if (
+            self._faulted
+            or self._last_command is not None
+        ):
+            raise LinkError(
+                "A fresh connection is required for this probe."
+            )
+
+        return self._state_fence()
+
+    def recover_state(self):
+        """Retry STATE once; never replay a game action."""
+        if not self._state_recovery_allowed:
+            raise LinkError(
+                "Only a failed STATE request may be recovered."
+            )
+
+        # Recovery cannot repeatedly enable itself.
+        self._state_recovery_allowed = False
+
+        return self._state_fence()
+
 
 if __name__ == "__main__":
-    ports = SerialLink.available_ports()
-
-    if not ports:
-        print("No serial ports detected.")
-    else:
-        print("Detected serial ports:")
-
-        for name, description in ports:
-            print(f"  {name}: {description}")
+    for name, description in SerialLink.available_ports():
+        print(f"{name}: {description}")

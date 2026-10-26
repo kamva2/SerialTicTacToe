@@ -12,7 +12,7 @@ from PIL import Image, ImageOps, ImageTk
 from gui_worker import SerialWorker
 
 
-POLL_INTERVAL_MS = 250
+POLL_INTERVAL_MS = 1000
 EVENT_INTERVAL_MS = 40
 
 ASSETS = Path(__file__).resolve().parent
@@ -24,7 +24,7 @@ RED = "#aa0000"
 MUTED = "#766e67"
 BORDER = "#e1d9d0"
 
-# Left-hand grid coordinates in the 678 x 452 Board.jpeg.
+# Coordinates in the current 523 x 452 Board.jpeg.
 X_EDGES = (55, 184, 324, 451)
 Y_EDGES = (30, 159, 293, 423)
 
@@ -40,14 +40,15 @@ def load_art(filename, trim=False):
     image = paper.convert("RGB")
 
     if trim:
-        # Remove white page margins in memory.
         mask = image.convert("L").point(
             lambda value: 255 if value < 250 else 0
         )
         bounds = mask.getbbox()
 
         if bounds is None:
-            raise ValueError(f"{filename} contains no visible mark.")
+            raise ValueError(
+                f"{filename} contains no visible mark."
+            )
 
         image = image.crop(bounds)
 
@@ -71,6 +72,15 @@ class CanvasCell:
         if "state" in options and options["state"] != self.state:
             self.state = options["state"]
             self.board.update_hover()
+
+    def cget(self, option):
+        if option == "state":
+            return self.state
+
+        if option == "text":
+            return self.text
+
+        raise KeyError(option)
 
 
 class ImageBoard(tk.Canvas):
@@ -118,11 +128,15 @@ class ImageBoard(tk.Canvas):
 
     def schedule_redraw(self, _event=None):
         if self.resize_job is None:
-            self.resize_job = self.after_idle(self._redraw)
+            self.resize_job = self.after_idle(
+                self._redraw
+            )
 
     def schedule_marks(self):
         if self.mark_job is None:
-            self.mark_job = self.after_idle(self._draw_marks)
+            self.mark_job = self.after_idle(
+                self._draw_marks
+            )
 
     def _redraw(self):
         self.resize_job = None
@@ -237,7 +251,6 @@ class ImageBoard(tk.Canvas):
         image_x = (x - self.origin_x) / self.scale_x
         image_y = (y - self.origin_y) / self.scale_y
 
-        # Ignore the thick divider strokes.
         if any(
             abs(image_x - edge) < 10
             for edge in X_EDGES[1:-1]
@@ -251,14 +264,12 @@ class ImageBoard(tk.Canvas):
             return None
 
         column = next(
-            index
-            for index in range(3)
+            index for index in range(3)
             if image_x < X_EDGES[index + 1]
         )
 
         row = next(
-            index
-            for index in range(3)
+            index for index in range(3)
             if image_y < Y_EDGES[index + 1]
         )
 
@@ -308,7 +319,7 @@ class ImageBoard(tk.Canvas):
             index is not None
             and self.cells[index].state == "normal"
         ):
-            # The server reply determines when a mark appears.
+            # Draw only after receiving the server snapshot.
             self.on_move(index)
 
 
@@ -318,6 +329,9 @@ class TicTacToeApp:
         self.worker = worker_factory()
 
         self.pending = False
+        self.pending_automatic = False
+        self.queued_command = None
+
         self.port_open = False
         self.connected = False
         self.faulted = False
@@ -366,13 +380,7 @@ class TicTacToeApp:
 
         self._refresh_ports()
 
-    def _button(
-        self,
-        parent,
-        text,
-        command,
-        primary=False,
-    ):
+    def _button(self, parent, text, command, primary=False):
         return tk.Button(
             parent,
             text=text,
@@ -424,11 +432,7 @@ class TicTacToeApp:
             padding=6,
         )
 
-        outer = tk.Frame(
-            self.root,
-            background=PAPER,
-        )
-
+        outer = tk.Frame(self.root, background=PAPER)
         outer.pack(
             fill="both",
             expand=True,
@@ -436,10 +440,7 @@ class TicTacToeApp:
             pady=18,
         )
 
-        header = tk.Frame(
-            outer,
-            background=PAPER,
-        )
+        header = tk.Frame(outer, background=PAPER)
         header.pack(fill="x")
 
         tk.Label(
@@ -456,6 +457,7 @@ class TicTacToeApp:
             background=PAPER,
             highlightthickness=0,
         )
+
         underline.pack(fill="x")
 
         underline.create_line(
@@ -466,11 +468,7 @@ class TicTacToeApp:
             capstyle="round",
         )
 
-        content = tk.Frame(
-            outer,
-            background=PAPER,
-        )
-
+        content = tk.Frame(outer, background=PAPER)
         content.pack(
             fill="both",
             expand=True,
@@ -507,11 +505,7 @@ class TicTacToeApp:
             pady=(16, 4),
         )
 
-        self.image_board = ImageBoard(
-            play,
-            self._move,
-        )
-
+        self.image_board = ImageBoard(play, self._move)
         self.image_board.pack(
             fill="both",
             expand=True,
@@ -521,11 +515,7 @@ class TicTacToeApp:
 
         self.cells = self.image_board.cells
 
-        actions = tk.Frame(
-            play,
-            background=WHITE,
-        )
-
+        actions = tk.Frame(play, background=WHITE)
         actions.pack(
             fill="x",
             padx=18,
@@ -538,6 +528,7 @@ class TicTacToeApp:
             lambda: self._send_command("NEW"),
             primary=True,
         )
+
         self.new_button.pack(side="left")
 
         self.resign_button = self._button(
@@ -567,11 +558,7 @@ class TicTacToeApp:
 
         side.pack_propagate(False)
 
-        panel = tk.Frame(
-            side,
-            background=WHITE,
-        )
-
+        panel = tk.Frame(side, background=WHITE)
         panel.pack(
             fill="both",
             expand=True,
@@ -618,10 +605,7 @@ class TicTacToeApp:
             pady=(0, 8),
         )
 
-        row = tk.Frame(
-            panel,
-            background=WHITE,
-        )
+        row = tk.Frame(panel, background=WHITE)
         row.pack(fill="x")
 
         self.connect_button = self._button(
@@ -704,14 +688,14 @@ class TicTacToeApp:
 
     def _update_controls(self):
         ready = (
-            not self.pending
-            and not self.closing
+            not self.closing
             and self.worker.is_alive()
+            and self.queued_command is None
+            and (not self.pending or self.pending_automatic)
         )
 
         healthy_session = (
-            self.connected
-            and not self.faulted
+            self.connected and not self.faulted
         )
 
         playing = (
@@ -720,17 +704,23 @@ class TicTacToeApp:
         )
 
         def enable(widget, condition):
-            widget.configure(
-                state="normal" if condition else "disabled"
-            )
+            current = str(widget.cget("state"))
 
-        self.port_combo.configure(
-            state=(
-                "readonly"
-                if ready and not self.port_open
-                else "disabled"
-            )
+            if condition:
+                if current == "disabled":
+                    widget.configure(state="normal")
+
+            elif current != "disabled":
+                widget.configure(state="disabled")
+
+        port_state = (
+            "readonly"
+            if ready and not self.port_open
+            else "disabled"
         )
+
+        if str(self.port_combo.cget("state")) != port_state:
+            self.port_combo.configure(state=port_state)
 
         enable(
             self.refresh_button,
@@ -761,9 +751,8 @@ class TicTacToeApp:
             ready and playing,
         )
 
-        # The server decides whether a cell is occupied.
-        for button in self.cells:
-            enable(button, ready and playing)
+        for cell in self.cells:
+            enable(cell, ready and playing)
 
     def _submit(
         self,
@@ -772,11 +761,31 @@ class TicTacToeApp:
         port_name="",
         automatic=False,
     ):
-        if (
-            self.pending
-            or self.closing
-            or not self.worker.is_alive()
-        ):
+        if self.closing or not self.worker.is_alive():
+            return False
+
+        if self.pending:
+            if (
+                self.pending_automatic
+                and not automatic
+                and operation == "COMMAND"
+                and self.queued_command is None
+            ):
+                self.queued_command = (
+                    command,
+                    (self.phase, self.snapshot),
+                )
+
+                self.status.set(
+                    f"Waiting for {command}..."
+                )
+
+                self._update_controls()
+                return True
+
+            return False
+
+        if self.queued_command is not None:
             return False
 
         accepted = self.worker.submit(
@@ -790,12 +799,14 @@ class TicTacToeApp:
             return False
 
         self.pending = True
+        self.pending_automatic = automatic
 
         if not automatic:
             if operation == "CONNECT":
                 self.status.set(
                     f"Connecting to {port_name}..."
                 )
+
                 self._log(
                     f"> CONNECT ({port_name})"
                 )
@@ -804,6 +815,7 @@ class TicTacToeApp:
                 self.status.set(
                     f"Waiting for {command}..."
                 )
+
                 self._log(f"> {command}")
 
         self._update_controls()
@@ -863,11 +875,73 @@ class TicTacToeApp:
                 f"RESIGN:{self.snapshot.turn}"
             )
 
+    def _dispatch_queued(self):
+        if (
+            self.queued_command is None
+            or self.pending
+            or self.closing
+        ):
+            return False
+
+        command, previous_view = self.queued_command
+        self.queued_command = None
+
+        if not self.port_open or self.faulted:
+            return False
+
+        if command != "DISCONNECT":
+            if not self.connected:
+                return False
+
+            if (self.phase, self.snapshot) != previous_view:
+                self.status.set(
+                    "The board changed. "
+                    "Please choose your action again."
+                )
+
+                self._log(
+                    "! Action cancelled because the board changed."
+                )
+                return False
+
+            name = command.split(":", 1)[0]
+
+            if name == "NEW":
+                available = self.phase in {
+                    "IDLE",
+                    "GAME_OVER",
+                }
+
+            elif name in {"MOVE", "RESIGN"}:
+                player = command.split(":")[1]
+
+                available = (
+                    self.phase == "IN_PROGRESS"
+                    and self.snapshot is not None
+                    and player == self.snapshot.turn
+                )
+
+            else:
+                available = True
+
+            if not available:
+                self.status.set(
+                    "That action is no longer available."
+                )
+                return False
+
+        return self._submit(
+            "COMMAND",
+            command=command,
+        )
+
     def _poll_state(self):
+        # Check the connection without limiting thinking time.
         if (
             self.connected
             and not self.faulted
             and not self.pending
+            and self.queued_command is None
             and not self.closing
         ):
             self._submit(
@@ -880,8 +954,8 @@ class TicTacToeApp:
             POLL_INTERVAL_MS,
             self._poll_state,
         )
-
     def _clear_confirmed_game(self):
+        self.queued_command = None
         self.snapshot = None
         self.phase = "IDLE"
 
@@ -913,8 +987,16 @@ class TicTacToeApp:
         return f"{snapshot.winner} wins"
 
     def _render_snapshot(self, snapshot):
-        self.snapshot = snapshot
+        description = self._describe_snapshot(snapshot)
         self.phase = snapshot.phase
+
+        if self.game_status.get() != description:
+            self.game_status.set(description)
+
+        if snapshot == self.snapshot:
+            return
+
+        self.snapshot = snapshot
 
         for button, cell in zip(
             self.cells,
@@ -932,37 +1014,61 @@ class TicTacToeApp:
                 disabledforeground=colour,
             )
 
-        self.game_status.set(
-            self._describe_snapshot(snapshot)
-        )
-
     def _mark_fault(self, message):
         self.pending = False
+        self.pending_automatic = False
+        self.queued_command = None
+
         self.connected = False
         self.port_open = False
         self.faulted = True
 
+        next_step = (
+            "Select the UART port and Connect to synchronise."
+            if self.worker.is_alive()
+            else "Restart the application."
+        )
+
         self.status.set(
-            f"Communication error: {message} "
-            "Reset the board before reconnecting."
+            f"Communication error: {message} {next_step}"
         )
 
         self._log(f"! {message}")
 
-        if self.snapshot is not None:
-            self.game_status.set(
-                "Last confirmed: "
-                + self._describe_snapshot(self.snapshot)
-            )
+        self.game_status.set(
+            "Last confirmed: "
+            + self._describe_snapshot(self.snapshot)
+            if self.snapshot is not None
+            else "No game connected."
+        )
 
     def _apply_event(self, event):
         self.port_open = event.port_open
         self.connected = event.session_connected
 
-        if event.error is not None:
-            self._mark_fault(
-                event.error or "Unknown serial error."
+        recovered = (
+            event.automatic
+            and event.recovery_error is not None
+        )
+
+        if recovered:
+            if (
+                self.queued_command is not None
+                and self.queued_command[0] != "DISCONNECT"
+            ):
+                self.queued_command = None
+
+                self._log(
+                    "! Pending action cancelled during recovery."
+                )
+
+            self._log(
+                "! Background STATE failed: "
+                f"{event.recovery_error}"
             )
+
+        if event.error is not None:
+            self._mark_fault(event.error)
             return
 
         if event.operation == "PORTS":
@@ -978,15 +1084,13 @@ class TicTacToeApp:
             self.port_combo.configure(values=labels)
 
             self.port_choice.set(
-                previous
-                if previous in labels
-                else ""
+                previous if previous in labels else ""
             )
 
             if self.faulted:
                 self.status.set(
-                    "Reset the board, select its UART port, "
-                    "then Connect."
+                    "Select the UART port and "
+                    "Connect to synchronise."
                 )
 
             elif labels:
@@ -1010,8 +1114,11 @@ class TicTacToeApp:
             )
             return
 
-        if event.operation == "CONNECT":
+        connecting = event.operation == "CONNECT"
+
+        if connecting:
             self.faulted = False
+            self.last_poll_error = None
 
         if reply.kind == "OK":
             self.last_poll_error = None
@@ -1030,60 +1137,76 @@ class TicTacToeApp:
             self._render_snapshot(reply.snapshot)
 
             if not event.automatic:
-                command_name = event.command.split(
-                    ":",
-                    1,
-                )[0]
+                name = event.command.split(":", 1)[0]
 
                 self.status.set(
-                    f"{command_name} accepted."
+                    "Connected. Retained game restored."
+                    if connecting
+                    else f"{name} accepted."
                 )
 
                 self._log(
-                    f"< {reply.snapshot}"
+                    f"< STATE: {reply.snapshot}"
+                    if connecting
+                    else f"< {reply.snapshot}"
+                )
+
+        elif (
+            reply.error_code == "NOGAME"
+            and self.connected
+            and (
+                connecting
+                or event.command == "STATE"
+            )
+        ):
+            self.last_poll_error = None
+
+            if (
+                connecting
+                or self.phase != "IDLE"
+                or self.snapshot is not None
+            ):
+                queued = self.queued_command
+                self._clear_confirmed_game()
+
+                if not connecting:
+                    self.queued_command = queued
+
+            if connecting:
+                self.status.set(
+                    "Connected. Start a new game."
+                )
+
+                self._log(
+                    "< STATE: NACK:NOGAME (connected, IDLE)"
                 )
 
         else:
-            quiet_idle_poll = (
-                event.automatic
-                and event.command == "STATE"
-                and self.phase == "IDLE"
-                and reply.error_code == "NOGAME"
-            )
-
-            if not quiet_idle_poll:
-                self.status.set(reply.message)
-
-                if (
-                    not event.automatic
-                    or self.last_poll_error != reply.error_code
-                ):
-                    self._log(
-                        f"< NACK:{reply.error_code} "
-                        f"- {reply.message}"
-                    )
-
-                if event.automatic:
-                    self.last_poll_error = reply.error_code
+            self.status.set(reply.message)
 
             if (
-                not self.connected
-                and self.snapshot is not None
+                not event.automatic
+                or self.last_poll_error != reply.error_code
             ):
+                self._log(
+                    f"< NACK:{reply.error_code} "
+                    f"- {reply.message}"
+                )
+
+            if event.automatic:
+                self.last_poll_error = reply.error_code
+
+            if not self.connected:
                 self.game_status.set(
                     "Last confirmed: "
                     + self._describe_snapshot(self.snapshot)
+                    if self.snapshot is not None
+                    else "No game connected."
                 )
 
-            if (
-                event.operation == "CONNECT"
-                and reply.error_code == "BUSY"
-            ):
-                self.status.set(
-                    "The board retains a game. "
-                    "Disconnect explicitly to end that session "
-                    "before connecting again."
-                )
+        if event.notice:
+            self._log(f"* {event.notice}")
+            self.status.set(event.notice)
 
     def _drain_events(self):
         while True:
@@ -1094,6 +1217,7 @@ class TicTacToeApp:
                 break
 
             self.pending = False
+            self.pending_automatic = False
 
             if event.operation == "STOP":
                 if event.error is not None:
@@ -1107,6 +1231,32 @@ class TicTacToeApp:
 
             self._apply_event(event)
 
+            if (
+                event.automatic
+                and self.queued_command is not None
+            ):
+                command, _view = self.queued_command
+                reply = event.reply
+
+                usable_poll = (
+                    event.error is None
+                    and reply is not None
+                    and (
+                        reply.kind == "SNAPSHOT"
+                        or (
+                            reply.kind == "NACK"
+                            and reply.error_code == "NOGAME"
+                            and self.phase == "IDLE"
+                        )
+                    )
+                )
+
+                if (
+                    command != "DISCONNECT"
+                    and not usable_poll
+                ):
+                    self.queued_command = None
+
         if (
             not self.worker.is_alive()
             and not self.stop_sent
@@ -1119,8 +1269,14 @@ class TicTacToeApp:
                 "Restart the application."
             )
 
-        if self.closing and self._request_stop():
-            return
+        if self.closing:
+            self.queued_command = None
+
+            if self._request_stop():
+                return
+
+        else:
+            self._dispatch_queued()
 
         self._update_controls()
 
@@ -1134,6 +1290,7 @@ class TicTacToeApp:
             return
 
         self.closing = True
+        self.queued_command = None
 
         self.status.set(
             "Closing the serial session..."
@@ -1141,7 +1298,6 @@ class TicTacToeApp:
 
         self._update_controls()
 
-        # Finish a pending transaction before submitting STOP.
         if not self.pending:
             self._request_stop()
 
@@ -1154,6 +1310,7 @@ class TicTacToeApp:
             return True
 
         if self.worker.submit("STOP"):
+            self.pending_automatic = False
             self.stop_sent = True
             self.pending = True
 
@@ -1171,12 +1328,24 @@ if __name__ == "__main__":
         app = TicTacToeApp(root)
 
     except (OSError, ValueError) as exc:
-        messagebox.showerror(
-            "Theme images could not load",
-            str(exc),
-            parent=root,
-        )
-        root.destroy()
+        print(f"GUI startup failed: {exc}")
+
+        try:
+            messagebox.showerror(
+                "Theme images could not load",
+                str(exc),
+                parent=root,
+            )
+
+        except tk.TclError:
+            pass
+
+        finally:
+            try:
+                root.destroy()
+
+            except tk.TclError:
+                pass
 
     else:
         root.mainloop()
