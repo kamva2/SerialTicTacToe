@@ -1,15 +1,315 @@
-"""Tkinter client for the STM32 serial Tic-Tac-Toe server."""
+"""Hand-drawn Tkinter client for the STM32 Tic-Tac-Toe server."""
 
 from __future__ import annotations
 
 import queue
+from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
+
+from PIL import Image, ImageOps, ImageTk
 
 from gui_worker import SerialWorker
 
+
 POLL_INTERVAL_MS = 250
 EVENT_INTERVAL_MS = 40
+
+ASSETS = Path(__file__).resolve().parent
+
+PAPER = "#f5f1eb"
+WHITE = "#ffffff"
+INK = "#181513"
+RED = "#aa0000"
+MUTED = "#766e67"
+BORDER = "#e1d9d0"
+
+# Left-hand grid coordinates in the 678 x 452 Board.jpeg.
+X_EDGES = (55, 184, 324, 451)
+Y_EDGES = (30, 159, 293, 423)
+
+
+def load_art(filename, trim=False):
+    path = ASSETS / filename
+
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+
+    paper = Image.new("RGBA", image.size, "white")
+    paper.alpha_composite(image)
+    image = paper.convert("RGB")
+
+    if trim:
+        # Remove white page margins in memory.
+        mask = image.convert("L").point(
+            lambda value: 255 if value < 250 else 0
+        )
+        bounds = mask.getbbox()
+
+        if bounds is None:
+            raise ValueError(f"{filename} contains no visible mark.")
+
+        image = image.crop(bounds)
+
+    return image
+
+
+class CanvasCell:
+    """Connect the image board to the GUI controller."""
+
+    def __init__(self, board, index):
+        self.board = board
+        self.index = index
+        self.text = ""
+        self.state = "disabled"
+
+    def configure(self, **options):
+        if "text" in options and options["text"] != self.text:
+            self.text = options["text"]
+            self.board.schedule_marks()
+
+        if "state" in options and options["state"] != self.state:
+            self.state = options["state"]
+            self.board.update_hover()
+
+
+class ImageBoard(tk.Canvas):
+    def __init__(self, parent, on_move):
+        super().__init__(
+            parent,
+            background=WHITE,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+
+        self.on_move = on_move
+        self.board_art = load_art("Board.jpeg")
+
+        self.symbols = {
+            "X": load_art("X_modified.png", trim=True),
+            "O": load_art("O_modified.png", trim=True),
+        }
+
+        if self.board_art.size != (523, 452):
+            raise ValueError(
+                "This layout expects the current "
+                "523 x 452 Board.jpeg."
+            )
+
+        self.cells = [
+            CanvasCell(self, index)
+            for index in range(9)
+        ]
+
+        self.scale_x = self.scale_y = 0.0
+        self.origin_x = self.origin_y = 0.0
+
+        self.hover = None
+        self.board_photo = None
+        self.mark_photos = {}
+
+        self.resize_job = None
+        self.mark_job = None
+
+        self.bind("<Configure>", self.schedule_redraw)
+        self.bind("<Motion>", self._motion)
+        self.bind("<Leave>", self._leave)
+        self.bind("<Button-1>", self._click)
+
+    def schedule_redraw(self, _event=None):
+        if self.resize_job is None:
+            self.resize_job = self.after_idle(self._redraw)
+
+    def schedule_marks(self):
+        if self.mark_job is None:
+            self.mark_job = self.after_idle(self._draw_marks)
+
+    def _redraw(self):
+        self.resize_job = None
+
+        if self.mark_job is not None:
+            self.after_cancel(self.mark_job)
+            self.mark_job = None
+
+        width = max(1, self.winfo_width() - 20)
+        height = max(1, self.winfo_height() - 20)
+
+        fitted = ImageOps.contain(
+            self.board_art,
+            (width, height),
+            method=Image.Resampling.LANCZOS,
+        )
+
+        self.origin_x = (
+            self.winfo_width() - fitted.width
+        ) / 2
+
+        self.origin_y = (
+            self.winfo_height() - fitted.height
+        ) / 2
+
+        self.scale_x = fitted.width / self.board_art.width
+        self.scale_y = fitted.height / self.board_art.height
+
+        self.delete("all")
+        self.mark_photos.clear()
+
+        self.board_photo = ImageTk.PhotoImage(
+            fitted,
+            master=self,
+        )
+
+        self.create_image(
+            self.origin_x,
+            self.origin_y,
+            image=self.board_photo,
+            anchor="nw",
+            tags="background",
+        )
+
+        self.hover = None
+        self._draw_marks()
+        self.update_hover()
+
+    def _draw_marks(self):
+        self.mark_job = None
+        self.delete("marks")
+
+        if self.scale_x <= 0 or self.scale_y <= 0:
+            return
+
+        for cell in self.cells:
+            if cell.text not in self.symbols:
+                continue
+
+            row, column = divmod(cell.index, 3)
+
+            x1, x2 = X_EDGES[column:column + 2]
+            y1, y2 = Y_EDGES[row:row + 2]
+
+            limit = max(
+                1,
+                int(
+                    0.72 * min(
+                        (x2 - x1) * self.scale_x,
+                        (y2 - y1) * self.scale_y,
+                    )
+                ),
+            )
+
+            key = (cell.text, limit)
+
+            if key not in self.mark_photos:
+                fitted = ImageOps.contain(
+                    self.symbols[cell.text],
+                    (limit, limit),
+                    method=Image.Resampling.LANCZOS,
+                )
+
+                self.mark_photos[key] = ImageTk.PhotoImage(
+                    fitted,
+                    master=self,
+                )
+
+            self.create_image(
+                self.origin_x
+                + (x1 + x2) * self.scale_x / 2,
+                self.origin_y
+                + (y1 + y2) * self.scale_y / 2,
+                image=self.mark_photos[key],
+                tags="marks",
+            )
+
+        self.update_hover()
+
+    def hit_test(self, x, y):
+        if self.scale_x <= 0 or self.scale_y <= 0:
+            return None
+
+        left = self.origin_x + X_EDGES[0] * self.scale_x
+        right = self.origin_x + X_EDGES[-1] * self.scale_x
+        top = self.origin_y + Y_EDGES[0] * self.scale_y
+        bottom = self.origin_y + Y_EDGES[-1] * self.scale_y
+
+        if not (left <= x < right and top <= y < bottom):
+            return None
+
+        image_x = (x - self.origin_x) / self.scale_x
+        image_y = (y - self.origin_y) / self.scale_y
+
+        # Ignore the thick divider strokes.
+        if any(
+            abs(image_x - edge) < 10
+            for edge in X_EDGES[1:-1]
+        ):
+            return None
+
+        if any(
+            abs(image_y - edge) < 10
+            for edge in Y_EDGES[1:-1]
+        ):
+            return None
+
+        column = next(
+            index
+            for index in range(3)
+            if image_x < X_EDGES[index + 1]
+        )
+
+        row = next(
+            index
+            for index in range(3)
+            if image_y < Y_EDGES[index + 1]
+        )
+
+        return row * 3 + column
+
+    def _motion(self, event):
+        self.hover = self.hit_test(event.x, event.y)
+        self.update_hover()
+
+    def _leave(self, _event=None):
+        self.hover = None
+        self.update_hover()
+
+    def update_hover(self):
+        self.delete("hover")
+
+        active = (
+            self.hover is not None
+            and self.cells[self.hover].state == "normal"
+        )
+
+        self.configure(
+            cursor="hand2" if active else "arrow"
+        )
+
+        if active:
+            row, column = divmod(self.hover, 3)
+
+            x1, x2 = X_EDGES[column:column + 2]
+            y1, y2 = Y_EDGES[row:row + 2]
+
+            self.create_rectangle(
+                self.origin_x + (x1 + 12) * self.scale_x,
+                self.origin_y + (y1 + 12) * self.scale_y,
+                self.origin_x + (x2 - 12) * self.scale_x,
+                self.origin_y + (y2 - 12) * self.scale_y,
+                outline="#ce8d8d",
+                width=2,
+                dash=(4, 4),
+                tags="hover",
+            )
+
+    def _click(self, event):
+        index = self.hit_test(event.x, event.y)
+
+        if (
+            index is not None
+            and self.cells[index].state == "normal"
+        ):
+            # The server reply determines when a mark appears.
+            self.on_move(index)
 
 
 class TicTacToeApp:
@@ -31,9 +331,11 @@ class TicTacToeApp:
         self.last_poll_error = None
 
         self.port_choice = tk.StringVar()
+
         self.status = tk.StringVar(
             value="Finding serial ports..."
         )
+
         self.game_status = tk.StringVar(
             value="No game connected."
         )
@@ -64,182 +366,335 @@ class TicTacToeApp:
 
         self._refresh_ports()
 
-    def _build_widgets(self):
-        self.root.title(
-            "EEE3095S - Serial Tic-Tac-Toe"
+    def _button(
+        self,
+        parent,
+        text,
+        command,
+        primary=False,
+    ):
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            font=("Segoe UI", 10, "bold"),
+            background=RED if primary else "#eee8e1",
+            foreground=WHITE if primary else INK,
+            activebackground=(
+                "#8d0000" if primary else "#e1d8ce"
+            ),
+            activeforeground=WHITE if primary else INK,
+            disabledforeground="#b6aaa0",
+            relief="flat",
+            borderwidth=0,
+            padx=15,
+            pady=10,
+            cursor="hand2",
         )
-        self.root.minsize(700, 680)
 
-        outer = ttk.Frame(
-            self.root,
-            padding=16,
+    def _build_widgets(self):
+        self.root.title("Tic Tac Toe - Ink and Paper")
+        self.root.configure(background=PAPER)
+
+        width = min(
+            1100,
+            self.root.winfo_screenwidth() - 60,
         )
+
+        height = min(
+            820,
+            self.root.winfo_screenheight() - 90,
+        )
+
+        self.root.geometry(f"{width}x{height}")
+
+        self.root.minsize(
+            min(940, width),
+            min(650, height),
+        )
+
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+
+        style.configure(
+            "Ink.TCombobox",
+            fieldbackground=WHITE,
+            background=PAPER,
+            foreground=INK,
+            padding=6,
+        )
+
+        outer = tk.Frame(
+            self.root,
+            background=PAPER,
+        )
+
         outer.pack(
             fill="both",
             expand=True,
+            padx=22,
+            pady=18,
         )
 
-        ttk.Label(
+        header = tk.Frame(
             outer,
-            text="Serial Tic-Tac-Toe",
-            font=("Segoe UI", 20, "bold"),
+            background=PAPER,
+        )
+        header.pack(fill="x")
+
+        tk.Label(
+            header,
+            text="tic tac toe",
+            font=("Segoe Print", 30, "bold"),
+            background=PAPER,
+            foreground=INK,
         ).pack(anchor="w")
 
-        ports = ttk.Frame(outer)
-        ports.pack(
-            fill="x",
-            pady=(14, 8),
+        underline = tk.Canvas(
+            header,
+            height=10,
+            background=PAPER,
+            highlightthickness=0,
         )
-        ports.columnconfigure(1, weight=1)
+        underline.pack(fill="x")
 
-        ttk.Label(
-            ports,
-            text="Port:",
-        ).grid(
+        underline.create_line(
+            2, 5, 95, 3, 195, 6, 285, 4,
+            fill=RED,
+            width=5,
+            smooth=True,
+            capstyle="round",
+        )
+
+        content = tk.Frame(
+            outer,
+            background=PAPER,
+        )
+
+        content.pack(
+            fill="both",
+            expand=True,
+            pady=(16, 0),
+        )
+
+        content.columnconfigure(0, weight=1)
+        content.columnconfigure(1, minsize=285)
+        content.rowconfigure(0, weight=1)
+
+        play = tk.Frame(
+            content,
+            background=WHITE,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+
+        play.grid(
             row=0,
             column=0,
-            padx=(0, 6),
+            sticky="nsew",
+            padx=(0, 16),
         )
 
-        self.port_combo = ttk.Combobox(
-            ports,
-            textvariable=self.port_choice,
-            state="readonly",
-            width=36,
-        )
-        self.port_combo.grid(
-            row=0,
-            column=1,
-            sticky="ew",
-        )
-
-        self.refresh_button = ttk.Button(
-            ports,
-            text="Refresh",
-            command=self._refresh_ports,
-        )
-        self.refresh_button.grid(
-            row=0,
-            column=2,
-            padx=5,
+        tk.Label(
+            play,
+            textvariable=self.game_status,
+            font=("Segoe Print", 16, "bold"),
+            background=WHITE,
+            foreground=RED,
+        ).pack(
+            anchor="w",
+            padx=18,
+            pady=(16, 4),
         )
 
-        self.connect_button = ttk.Button(
-            ports,
-            text="Connect",
-            command=self._connect,
-        )
-        self.connect_button.grid(
-            row=0,
-            column=3,
-            padx=5,
+        self.image_board = ImageBoard(
+            play,
+            self._move,
         )
 
-        self.disconnect_button = ttk.Button(
-            ports,
-            text="Disconnect",
-            command=lambda: self._send_command(
-                "DISCONNECT"
-            ),
-        )
-        self.disconnect_button.grid(
-            row=0,
-            column=4,
-            padx=(5, 0),
+        self.image_board.pack(
+            fill="both",
+            expand=True,
+            padx=8,
+            pady=8,
         )
 
-        actions = ttk.Frame(outer)
+        self.cells = self.image_board.cells
+
+        actions = tk.Frame(
+            play,
+            background=WHITE,
+        )
+
         actions.pack(
             fill="x",
-            pady=6,
+            padx=18,
+            pady=(0, 18),
         )
 
-        self.new_button = ttk.Button(
+        self.new_button = self._button(
             actions,
-            text="New Game",
-            command=lambda: self._send_command("NEW"),
+            "NEW GAME",
+            lambda: self._send_command("NEW"),
+            primary=True,
         )
         self.new_button.pack(side="left")
 
-        self.resign_button = ttk.Button(
+        self.resign_button = self._button(
             actions,
-            text="Resign",
-            command=self._resign,
+            "RESIGN",
+            self._resign,
         )
+
         self.resign_button.pack(
             side="left",
-            padx=8,
+            padx=10,
         )
 
-        ttk.Label(
-            outer,
-            textvariable=self.game_status,
-            font=("Segoe UI", 13, "bold"),
-        ).pack(
-            anchor="w",
-            pady=10,
+        side = tk.Frame(
+            content,
+            background=WHITE,
+            width=285,
+            highlightbackground=BORDER,
+            highlightthickness=1,
         )
 
-        board = ttk.Frame(outer)
-        board.pack(
+        side.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+        )
+
+        side.pack_propagate(False)
+
+        panel = tk.Frame(
+            side,
+            background=WHITE,
+        )
+
+        panel.pack(
             fill="both",
+            expand=True,
+            padx=16,
+            pady=16,
+        )
+
+        def label(text):
+            tk.Label(
+                panel,
+                text=text,
+                font=("Segoe Print", 15, "bold"),
+                background=WHITE,
+                foreground=INK,
+            ).pack(
+                anchor="w",
+                pady=(0, 10),
+            )
+
+        label("Connection")
+
+        self.port_combo = ttk.Combobox(
+            panel,
+            textvariable=self.port_choice,
+            state="readonly",
+            style="Ink.TCombobox",
+            font=("Segoe UI", 9),
+            width=26,
+        )
+
+        self.port_combo.pack(
+            fill="x",
+            pady=(0, 8),
+        )
+
+        self.refresh_button = self._button(
+            panel,
+            "REFRESH PORTS",
+            self._refresh_ports,
+        )
+
+        self.refresh_button.pack(
+            fill="x",
+            pady=(0, 8),
+        )
+
+        row = tk.Frame(
+            panel,
+            background=WHITE,
+        )
+        row.pack(fill="x")
+
+        self.connect_button = self._button(
+            row,
+            "CONNECT",
+            self._connect,
+            primary=True,
+        )
+
+        self.connect_button.pack(
+            side="left",
+            fill="x",
             expand=True,
         )
 
-        self.cells = []
-
-        for index in range(9):
-            button = tk.Button(
-                board,
-                text="",
-                font=("Segoe UI", 28, "bold"),
-                background="white",
-                activebackground="#e8eef5",
-                relief="groove",
-                borderwidth=1,
-                command=lambda cell=index: self._move(
-                    cell
-                ),
-            )
-            button.grid(
-                row=index // 3,
-                column=index % 3,
-                sticky="nsew",
-                padx=3,
-                pady=3,
-            )
-
-            self.cells.append(button)
-
-        for index in range(3):
-            board.rowconfigure(
-                index,
-                weight=1,
-                minsize=70,
-            )
-            board.columnconfigure(
-                index,
-                weight=1,
-            )
-
-        ttk.Label(
-            outer,
-            textvariable=self.status,
-            wraplength=660,
-        ).pack(
-            anchor="w",
-            fill="x",
-            pady=(12, 8),
+        self.disconnect_button = self._button(
+            row,
+            "DISCONNECT",
+            lambda: self._send_command("DISCONNECT"),
         )
+
+        self.disconnect_button.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(6, 0),
+        )
+
+        tk.Frame(
+            panel,
+            height=1,
+            background=BORDER,
+        ).pack(
+            fill="x",
+            pady=18,
+        )
+
+        label("Status")
+
+        tk.Label(
+            panel,
+            textvariable=self.status,
+            background=WHITE,
+            foreground=MUTED,
+            font=("Segoe UI", 10),
+            wraplength=245,
+            justify="left",
+            anchor="w",
+        ).pack(
+            fill="x",
+            pady=(0, 20),
+        )
+
+        label("Activity")
 
         self.log = tk.Text(
-            outer,
-            height=6,
+            panel,
+            height=8,
             state="disabled",
+            background="#faf7f3",
+            foreground=INK,
             font=("Consolas", 9),
             wrap="word",
+            relief="flat",
+            borderwidth=0,
+            highlightbackground=BORDER,
+            highlightthickness=1,
         )
-        self.log.pack(fill="x")
+
+        self.log.pack(
+            fill="both",
+            expand=True,
+        )
 
     def _log(self, message):
         self.log.configure(state="normal")
@@ -266,11 +721,7 @@ class TicTacToeApp:
 
         def enable(widget, condition):
             widget.configure(
-                state=(
-                    "normal"
-                    if condition
-                    else "disabled"
-                )
+                state="normal" if condition else "disabled"
             )
 
         self.port_combo.configure(
@@ -312,10 +763,7 @@ class TicTacToeApp:
 
         # The server decides whether a cell is occupied.
         for button in self.cells:
-            enable(
-                button,
-                ready and playing,
-            )
+            enable(button, ready and playing)
 
     def _submit(
         self,
@@ -693,7 +1141,7 @@ class TicTacToeApp:
 
         self._update_controls()
 
-        # Wait for a pending transaction before submitting STOP.
+        # Finish a pending transaction before submitting STOP.
         if not self.pending:
             self._request_stop()
 
@@ -718,5 +1166,17 @@ class TicTacToeApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = TicTacToeApp(root)
-    root.mainloop()
+
+    try:
+        app = TicTacToeApp(root)
+
+    except (OSError, ValueError) as exc:
+        messagebox.showerror(
+            "Theme images could not load",
+            str(exc),
+            parent=root,
+        )
+        root.destroy()
+
+    else:
+        root.mainloop()
